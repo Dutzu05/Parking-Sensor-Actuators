@@ -13,7 +13,47 @@ volatile uint8_t capture_state = 0;
 
 volatile uint16_t buzzer_ms = 0;
 
-/* ===================== LEDS ===================== */
+/* Buttons: PC0 (A0) = CW, PC1 (A1) = CCW  (active LOW, pull-up)
+   Motor pins: PB1 = CW, PB2 = CCW */
+
+#define BTN_CW_MASK     0b00000001   // PC0
+#define BTN_CCW_MASK    0b00000010   // PC1
+
+#define MOTOR_CW_MASK   0b00000010   // PB1
+#define MOTOR_CCW_MASK  0b00000100   // PB2
+
+static inline void motor_stop(void)
+{
+    PORTB &= (uint8_t)~(MOTOR_CW_MASK | MOTOR_CCW_MASK);
+}
+
+static inline void motor_cw(void)
+{
+    PORTB |= MOTOR_CW_MASK;
+    PORTB &= (uint8_t)~MOTOR_CCW_MASK;
+}
+
+static inline void motor_ccw(void)
+{
+    PORTB |= MOTOR_CCW_MASK;
+    PORTB &= (uint8_t)~MOTOR_CW_MASK;
+}
+
+static inline void motor_buttons_update(void)
+{
+    uint8_t buttons = PINC;
+
+    uint8_t cw_pressed  = ((buttons & BTN_CW_MASK) == 0);
+    uint8_t ccw_pressed = ((buttons & BTN_CCW_MASK) == 0);
+
+    if (cw_pressed && !ccw_pressed && distance_cm > 10)
+        motor_cw();
+    else if (ccw_pressed && !cw_pressed && distance_cm > 10)
+        motor_ccw();
+    else
+        motor_stop();
+}
+
 /* PD2 = Green (always ON)
    PD4 = Red   (<10 cm)
    PD7 = Yellow (<20 cm) */
@@ -36,14 +76,10 @@ static inline void leds_update(uint16_t dist)
         PORTD |= 0b00010000; // PD4
 }
 
-/* ===================== BUZZER (PWM on PD3 / OC2B) ===================== */
-
 static inline void buzzer_set(uint8_t volume)
 {
     OCR2B = volume; // 0 = OFF
 }
-
-/* ===================== ULTRASONIC ===================== */
 
 static inline void ultrasonic_trigger(void)
 {
@@ -55,8 +91,6 @@ static inline void ultrasonic_trigger(void)
 
     PORTB &= 0b11110111; // PB3 LOW
 }
-
-/* ===================== TIMER1 INPUT CAPTURE ===================== */
 
 ISR(TIMER1_CAPT_vect)
 {
@@ -77,8 +111,6 @@ ISR(TIMER1_CAPT_vect)
     }
 }
 
-/* ===================== TIMER0 1ms SCHEDULER ===================== */
-
 ISR(TIMER0_COMPA_vect)
 {
     if (++ms >= 50)
@@ -88,6 +120,9 @@ ISR(TIMER0_COMPA_vect)
     }
 
     leds_update(distance_cm);
+
+    // motor direction control from buttons
+    motor_buttons_update();
 
     uint16_t interval;
 
@@ -116,8 +151,6 @@ ISR(TIMER0_COMPA_vect)
     }
 }
 
-/* ===================== INIT ===================== */
-
 void init_gpio(void)
 {
     // PD2, PD4, PD7 outputs (LEDs)
@@ -134,6 +167,14 @@ void init_gpio(void)
 
     // PB0 input (ECHO ICP1)
     DDRB &= 0b11111110;
+
+    // motor pins PB1, PB2 outputs
+    DDRB |= (MOTOR_CW_MASK | MOTOR_CCW_MASK);
+    motor_stop();
+
+    // buttons PC0, PC1 inputs + pull-ups enabled
+    DDRC &= (uint8_t)~(BTN_CW_MASK | BTN_CCW_MASK);
+    PORTC |= (BTN_CW_MASK | BTN_CCW_MASK);
 }
 
 void init_timer0(void)
@@ -161,7 +202,11 @@ void init_timer2_pwm(void)
     OCR2B = 0;
 }
 
-/* ===================== MAIN ===================== */
+// Timer2 PWM for buzzer on PD3 (OC2B):
+// - Fast PWM mode with TOP=OCR2A (WGM=7) => OCR2A sets frequency (tone)
+// - Non-inverting on OC2B (COM2B1=1)     => PD3 HIGH then LOW at OCR2B (duty cycle)
+// - Prescaler /32                       => timer clock = F_CPU/32
+// - OCR2A=249 => ~2 kHz tone, OCR2B controls volume (0=silent)
 
 int main(void)
 {
